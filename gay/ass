@@ -1,0 +1,939 @@
+#!/usr/bin/env python3
+"""
+free_promptsafe_adaptive.py
+
+Competitive-programming subproblem generator with:
+- URL / raw text / .txt / .md / .docx input
+- Gemini API backend via google-genai
+- JSON + LaTeX export, optional PDF
+- Streamlit local web UI with a project queue
+
+Design goals:
+- Model writes plain contest-style notation in JSON (N, K, <=, sqrt(N), log(N), A_i, O(n log n))
+- JSON stays parseable and plain-text friendly
+- Python converts math-like notation into LaTeX only during rendering
+- LaTeX remains stable even when the model uses adaptive variables like N, K, M, Q
+
+Install:
+  pip install requests beautifulsoup4 python-docx streamlit google-genai
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
+import unicodedata
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import requests
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None  # type: ignore
+
+try:
+    from google import genai
+    from google.genai import types
+except ImportError as e:
+    genai = None  # type: ignore
+    types = None  # type: ignore
+    _GENAI_IMPORT_ERROR = e
+else:
+    _GENAI_IMPORT_ERROR = None
+
+
+@dataclass
+class Subproblem:
+    title: str
+    statement: str
+    why_easier: str
+    intended_technique: str
+    constraints: str = ""
+    sample_input: str = ""
+    sample_output: str = ""
+    notes_for_setter: str = ""
+
+
+@dataclass
+class Result:
+    title: str
+    original_summary: str
+    key_ideas: List[str]
+    subproblems: List[Subproblem]
+    source_preview: str = ""
+    created_at: str = dataclasses.field(default_factory=lambda: dt.datetime.now().isoformat(timespec="seconds"))
+
+
+def normalize_text(text: str) -> str:
+    text = text.replace("\u00a0", " ")
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def ascii_normalize(text: str) -> str:
+    if text is None:
+        return ""
+    text = unicodedata.normalize("NFKD", str(text))
+    return text.encode("ascii", "ignore").decode("ascii")
+
+
+def slugify(text: str, fallback: str = "project") -> str:
+    text = text.lower().strip()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = re.sub(r"-{2,}", "-", text).strip("-")
+    return text[:60] or fallback
+
+
+def get_api_key(cli_key: str = "") -> str:
+    return (cli_key or os.getenv("GOOGLE_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")).strip()
+
+
+def validate_model_name(model: str) -> None:
+    model = (model or "").strip()
+    if not model:
+        raise ValueError("Empty model name.")
+    if model.startswith("gemma-"):
+        raise ValueError(
+            "Gemma model names are not safe defaults for this Gemini API script. "
+            "Use a Gemini model such as gemini-2.5-flash, gemini-2.5-pro, "
+            "gemini-3-flash-preview, or gemini-3.1-pro-preview."
+        )
+
+
+# ----------------------------- text cleanup -----------------------------
+
+_LATEX_TO_PLAIN_REPLACEMENTS = [
+    (re.compile(r"\\mathcal\{O\}"), "O"),
+    (re.compile(r"\\leq"), "<="),
+    (re.compile(r"\\le"), "<="),
+    (re.compile(r"\\geq"), ">="),
+    (re.compile(r"\\ge"), ">="),
+    (re.compile(r"\\neq"), "!="),
+    (re.compile(r"\\times"), "x"),
+    (re.compile(r"\\to"), "->"),
+    (re.compile(r"\\left"), ""),
+    (re.compile(r"\\right"), ""),
+]
+
+_TEXTTT_RE = re.compile(r"\\texttt\{([^{}]*)\}")
+_SQRT_RE = re.compile(r"\\sqrt\{([^{}]*)\}")
+_SIMPLE_BRACE_RE = re.compile(r"\\([A-Za-z]+)\{([^{}]*)\}")
+
+
+def cleanup_model_text(text: str) -> str:
+    """Convert accidental LaTeX-ish fragments into plain contest-style text."""
+    if text is None:
+        return ""
+    text = ascii_normalize(text)
+    text = text.replace("$", "")
+    for rx, rep in _LATEX_TO_PLAIN_REPLACEMENTS:
+        text = rx.sub(rep, text)
+    text = _TEXTTT_RE.sub(r"\1", text)
+    text = _SQRT_RE.sub(r"sqrt(\1)", text)
+    text = _SIMPLE_BRACE_RE.sub(r"\2", text)
+    text = text.replace("\\", "")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def sanitize_verbatim_text(text: str) -> str:
+    if text is None:
+        return ""
+    text = ascii_normalize(text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\t", "    ")
+    return text.strip("\n")
+
+
+# ----------------------------- prompt -----------------------------
+
+def build_prompt(statement: str, n: int, language: str = "en") -> str:
+    lang_rule = "Write everything in English." if language == "en" else "Write everything in Vietnamese."
+    return textwrap.dedent(f"""
+    You are an expert competitive-programming problem setter and a careful mathematical writing assistant.
+
+    Read the problem statement below and generate exactly {n} easier subproblems that form a clean difficulty ladder from easier to harder.
+    Keep every subproblem closely related to the original task.
+    Do not copy the original statement verbatim.
+    Do not invent unsupported mechanics, constraints, or query types.
+    {lang_rule}
+
+    OUTPUT RULES:
+    - Output STRICT JSON only.
+    - No markdown.
+    - No code fences.
+    - No explanation.
+    - No extra text before or after the JSON.
+    - The output must be a single valid JSON object that can be parsed directly by json.loads.
+
+    CONTENT RULES:
+    - Use plain contest-style notation in the JSON text.
+    - Do not write raw LaTeX commands.
+    - Do not write backslashes.
+    - Do not write Unicode math symbols.
+    - Prefer plain text notation such as:
+      N, K, M, Q, A_i, B_i, N <= 1e5, sqrt(N), log(N), O(n log n), i < j, x^2
+    - If you need inequalities, use <=, >=, !=, <, >.
+    - If you need radicals, use sqrt(N) or sqrt(x).
+    - If you need complexity notation, use O(n log n) or O(N sqrt(N)).
+    - Use the variable names that fit the problem naturally. Do not force N if the problem uses K or Q.
+    - Keep the ladder logically connected to the original problem.
+    - The first subproblem must be the easiest natural simplification of the original.
+    - Each later subproblem should add one new layer of difficulty.
+    - Prefer gradual simplifications such as:
+      static -> dynamic
+      no updates -> point updates
+      subtree -> path
+      one query type -> multiple query types
+      small constraints -> full constraints
+      fixed start -> optimize over all starts
+
+    JSON QUALITY RULES:
+    - title: short, descriptive, ASCII-safe.
+    - statement: self-contained, precise, and clear.
+    - why_easier: explain exactly what was removed or simplified.
+    - intended_technique: a concrete algorithmic idea.
+    - constraints: realistic, smaller than the original, written in plain text notation.
+    - sample_input and sample_output may be empty strings if not safe to invent.
+    - notes_for_setter: mention ambiguity, edge cases, or design concerns.
+
+    FINAL SELF-CHECK:
+    - The result is valid JSON.
+    - Every string is plain text and has no raw backslashes.
+    - There are no trailing commas.
+    - The JSON can be parsed directly with json.loads.
+
+    Return exactly this JSON schema:
+    {{
+      "title": "ASCII-safe English title",
+      "original_summary": "Short summary of the original problem",
+      "key_ideas": ["idea 1", "idea 2", "idea 3"],
+      "subproblems": [
+        {{
+          "title": "ASCII-safe subproblem title",
+          "statement": "Self-contained statement in plain text, using math notation naturally",
+          "why_easier": "Why this version is easier than the original",
+          "intended_technique": "Expected algorithmic idea",
+          "constraints": "Small and realistic constraints",
+          "sample_input": "",
+          "sample_output": "",
+          "notes_for_setter": "Optional comments for the setter"
+        }}
+      ]
+    }}
+
+    Original problem statement:
+    ---
+    {statement}
+    ---
+    """).strip()
+
+
+# ----------------------------- input loading -----------------------------
+
+def load_docx_text(path: Path) -> str:
+    try:
+        import docx  # python-docx
+    except ImportError as e:
+        raise SystemExit("Install python-docx: pip install python-docx") from e
+    doc = docx.Document(str(path))
+    parts = [p.text for p in doc.paragraphs if p.text.strip()]
+    return normalize_text("\n".join(parts))
+
+
+def fetch_url_text(url: str, timeout: int = 20) -> str:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; FreeSubproblemStudio/1.0)",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    r = requests.get(url, headers=headers, timeout=timeout)
+    r.raise_for_status()
+
+    ctype = r.headers.get("content-type", "").lower()
+    if "html" not in ctype:
+        return normalize_text(r.text)
+
+    html = r.text
+    if BeautifulSoup is None:
+        text = re.sub(r"(?is)<script.*?>.*?</script>", " ", html)
+        text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        return normalize_text(text)
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "svg", "img"]):
+        tag.decompose()
+
+    candidates: List[str] = []
+    for selector in ["main", "article", "[role=main]", ".problem-statement", ".statement", ".content"]:
+        for node in soup.select(selector):
+            txt = node.get_text("\n", strip=True)
+            if len(txt) > 200:
+                candidates.append(txt)
+
+    if candidates:
+        return normalize_text(max(candidates, key=len))
+
+    body = soup.body or soup
+    return normalize_text(body.get_text("\n", strip=True))
+
+
+def load_input(source: str) -> str:
+    source = source.strip()
+    if not source:
+        return ""
+    if source.startswith(("http://", "https://")):
+        return fetch_url_text(source)
+
+    p = Path(source)
+    if p.exists() and p.is_file():
+        if p.suffix.lower() == ".docx":
+            return load_docx_text(p)
+        return normalize_text(p.read_text(encoding="utf-8", errors="ignore"))
+
+    return source
+
+
+# ----------------------------- Gemini API -----------------------------
+
+def gemini_generate_text(prompt: str, model: str, api_key: str, temperature: float = 0.2) -> str:
+    if _GENAI_IMPORT_ERROR is not None:
+        raise SystemExit(
+            "Missing dependency google-genai. Install it with:\n"
+            "  pip install google-genai\n"
+        ) from _GENAI_IMPORT_ERROR
+
+    validate_model_name(model)
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=temperature,
+            response_mime_type="application/json",
+        ),
+    )
+
+    text = getattr(response, "text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+
+    try:
+        return response.candidates[0].content.parts[0].text.strip()  # type: ignore[attr-defined]
+    except Exception as e:
+        raise RuntimeError(f"Gemini returned an unexpected response shape: {response!r}") from e
+
+
+def extract_json(text: str) -> Dict[str, Any]:
+    text = text.strip()
+
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+
+    m = re.search(r"\{.*\}", text, flags=re.S)
+    if m:
+        text = m.group(0)
+
+    # Repair accidental single backslashes like \le or \sqrt that break JSON parsing.
+    text = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', text)
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        print("==== RAW LLM OUTPUT ====")
+        print(text[:2500])
+        print("==== ERROR ====")
+        print(e)
+        raise
+
+
+# ----------------------------- math normalization -----------------------------
+
+_COMMON_VARIABLES = [
+    "N", "M", "K", "Q", "A", "B", "C", "D", "E", "F", "G", "H", "L", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+    "n", "m", "k", "q", "i", "j", "t", "u", "v", "x", "y", "z", "p", "r", "s", "l",
+]
+
+_RELATION_MAP = {
+    "<=": r"\le",
+    ">=": r"\ge",
+    "!=": r"\ne",
+    "<": "<",
+    ">": ">",
+    "=": "=",
+}
+
+
+def normalize_math_fragment(fragment: str) -> str:
+    """Convert a plain-text math fragment into LaTeX math text, without surrounding $...$."""
+    if fragment is None:
+        return ""
+
+    s = ascii_normalize(fragment).strip()
+    s = cleanup_model_text(s)
+
+    def repl_sqrt(m: re.Match) -> str:
+        inner = normalize_math_fragment(m.group(1))
+        return rf"\sqrt{{{inner}}}"
+
+    def repl_log2(m: re.Match) -> str:
+        inner = normalize_math_fragment(m.group(1))
+        return rf"\log_2 {inner}"
+
+    def repl_log(m: re.Match) -> str:
+        inner = normalize_math_fragment(m.group(1))
+        return rf"\log {inner}"
+
+    def repl_big_o(m: re.Match) -> str:
+        inner = normalize_math_fragment(m.group(1))
+        return rf"\mathcal{{O}}({inner})"
+
+    s = re.sub(r"(?i)\bsqrt\(\s*([^)]+?)\s*\)", repl_sqrt, s)
+    s = re.sub(r"(?i)\blog2\(\s*([^)]+?)\s*\)", repl_log2, s)
+    s = re.sub(r"(?i)\blog\(\s*([^)]+?)\s*\)", repl_log, s)
+    s = re.sub(r"(?i)\bO\(\s*([^)]+?)\s*\)", repl_big_o, s)
+    s = re.sub(r"(?i)\bo\(\s*([^)]+?)\s*\)", repl_big_o, s)
+
+    s = re.sub(r"\b([A-Za-z])_([A-Za-z0-9]+)\b", r"\1_{\2}", s)
+    s = re.sub(r"\b([A-Za-z0-9]+)\^([A-Za-z0-9]+)\b", r"\1^{\2}", s)
+    s = s.replace("! =", "!=")
+    s = s.replace("< =", "<=")
+    s = s.replace("> =", ">=")
+    return s
+
+
+def mathify_plain_text(text: str) -> str:
+    """Convert a plain-text sentence into a LaTeX string with inline math segments."""
+    if text is None:
+        return ""
+
+    s = ascii_normalize(text)
+    s = cleanup_model_text(s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    placeholders: List[str] = []
+
+    def protect(math_body: str) -> str:
+        token = f"@@MATH{len(placeholders)}@@"
+        placeholders.append(f"${math_body}$")
+        return token
+
+    # 1) explicit function-like forms
+    s = re.sub(
+        r"(?i)\bsqrt\(\s*([^)]+?)\s*\)",
+        lambda m: protect(rf"\sqrt{{{normalize_math_fragment(m.group(1))}}}"),
+        s,
+    )
+    s = re.sub(
+        r"(?i)\blog2\(\s*([^)]+?)\s*\)",
+        lambda m: protect(rf"\log_2 {normalize_math_fragment(m.group(1))}"),
+        s,
+    )
+    s = re.sub(
+        r"(?i)\blog\(\s*([^)]+?)\s*\)",
+        lambda m: protect(rf"\log {normalize_math_fragment(m.group(1))}"),
+        s,
+    )
+    s = re.sub(
+        r"(?i)\bO\(\s*([^)]+?)\s*\)",
+        lambda m: protect(rf"\mathcal{{O}}({normalize_math_fragment(m.group(1))})"),
+        s,
+    )
+
+    # 2) relations like N <= 1e5, A_i > A_j
+    rel_atom = r"[A-Za-z0-9_().+\-*/^]+"
+    rel_pat = re.compile(rf"\b({rel_atom})\s*(<=|>=|!=|=|<|>)\s*({rel_atom})\b")
+
+    def repl_relation(m: re.Match) -> str:
+        lhs = normalize_math_fragment(m.group(1))
+        op = _RELATION_MAP[m.group(2)]
+        rhs = normalize_math_fragment(m.group(3))
+        return protect(f"{lhs} {op} {rhs}")
+
+    s = rel_pat.sub(repl_relation, s)
+
+    # 3) subscripts / powers
+    s = re.sub(
+        r"\b([A-Za-z]+_[A-Za-z0-9]+)\b",
+        lambda m: protect(normalize_math_fragment(m.group(1))),
+        s,
+    )
+    s = re.sub(
+        r"\b([A-Za-z0-9]+(?:\^[A-Za-z0-9]+)+)\b",
+        lambda m: protect(normalize_math_fragment(m.group(1))),
+        s,
+    )
+
+    # 4) common standalone variables
+    for var in _COMMON_VARIABLES:
+        s = re.sub(
+            rf"(?<![\w$]){re.escape(var)}(?![\w$])",
+            lambda m: protect(normalize_math_fragment(m.group(0))),
+            s,
+        )
+
+    # 5) restore math placeholders
+    for i, token in enumerate(placeholders):
+        s = s.replace(f"@@MATH{i}@@", token)
+
+    return s
+
+
+def latex_escape_plain(text: str) -> str:
+    text = "" if text is None else str(text)
+    repl = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(repl.get(ch, ch) for ch in text)
+
+
+def latex_safe_with_math(text: str, *, keep_newlines: bool = True) -> str:
+    if text is None:
+        return ""
+
+    text = mathify_plain_text(text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    if not keep_newlines:
+        text = re.sub(r"\n+", " ", text)
+    else:
+        text = re.sub(r"\n{3,}", "\n\n", text)
+
+    parts = re.split(r"(\$.*?\$)", text)
+    out: List[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith("$") and part.endswith("$") and len(part) >= 2:
+            out.append(part)
+        else:
+            out.append(latex_escape_plain(part))
+    return "".join(out).strip()
+
+
+def sanitize_result_strings(res: Result) -> Result:
+    res.title = cleanup_model_text(res.title)
+    res.original_summary = cleanup_model_text(res.original_summary)
+    res.key_ideas = [cleanup_model_text(x) for x in res.key_ideas]
+
+    cleaned: List[Subproblem] = []
+    for sp in res.subproblems:
+        cleaned.append(
+            Subproblem(
+                title=cleanup_model_text(sp.title),
+                statement=cleanup_model_text(sp.statement),
+                why_easier=cleanup_model_text(sp.why_easier),
+                intended_technique=cleanup_model_text(sp.intended_technique),
+                constraints=cleanup_model_text(sp.constraints),
+                sample_input=sanitize_verbatim_text(sp.sample_input),
+                sample_output=sanitize_verbatim_text(sp.sample_output),
+                notes_for_setter=cleanup_model_text(sp.notes_for_setter),
+            )
+        )
+    res.subproblems = cleaned
+    res.source_preview = cleanup_model_text(res.source_preview)
+    return res
+
+
+def coerce_result(data: Dict[str, Any], source_preview: str = "") -> Result:
+    subs: List[Subproblem] = []
+    for item in data.get("subproblems", []):
+        if not isinstance(item, dict):
+            continue
+        subs.append(
+            Subproblem(
+                title=str(item.get("title", "")).strip(),
+                statement=str(item.get("statement", "")).strip(),
+                why_easier=str(item.get("why_easier", "")).strip(),
+                intended_technique=str(item.get("intended_technique", "")).strip(),
+                constraints=str(item.get("constraints", "")).strip(),
+                sample_input=str(item.get("sample_input", "")).strip(),
+                sample_output=str(item.get("sample_output", "")).strip(),
+                notes_for_setter=str(item.get("notes_for_setter", "")).strip(),
+            )
+        )
+
+    result = Result(
+        title=str(data.get("title", "Generated subproblem ladder")).strip(),
+        original_summary=str(data.get("original_summary", "")).strip(),
+        key_ideas=[str(x).strip() for x in data.get("key_ideas", []) if str(x).strip()],
+        subproblems=subs,
+        source_preview=source_preview,
+    )
+    return sanitize_result_strings(result)
+
+
+def generate(statement: str, n: int, model: str, api_key: str, language: str = "en", temperature: float = 0.2) -> Result:
+    print("⏳ Generating subproblems... please wait")
+    prompt = build_prompt(statement, n=n, language=language)
+    raw = gemini_generate_text(prompt=prompt, model=model, api_key=api_key, temperature=temperature)
+    data = extract_json(raw)
+    result = coerce_result(data, source_preview=statement[:2000])
+    print("✅ Done!")
+    return result
+
+
+# ----------------------------- LaTeX rendering -----------------------------
+
+def render_problem_body(res: Result) -> List[str]:
+    lines: List[str] = []
+
+    if res.original_summary:
+        lines += [r"\section*{Original problem summary}", latex_safe_with_math(res.original_summary), ""]
+
+    if res.key_ideas:
+        lines += [r"\section*{Key ideas}", r"\begin{itemize}"]
+        lines += [r"\item " + latex_safe_with_math(x, keep_newlines=False) for x in res.key_ideas]
+        lines += [r"\end{itemize}", ""]
+
+    lines.append(r"\section*{Generated easier subproblems}")
+    for i, sp in enumerate(res.subproblems, 1):
+        title = sp.title or f"Subproblem {i}"
+        lines += [r"\subsection*{Subproblem " + str(i) + r": " + latex_safe_with_math(title, keep_newlines=False) + "}"]
+        if sp.statement:
+            lines += [r"\textbf{Statement.} " + latex_safe_with_math(sp.statement) + r"\\[6pt]"]
+        if sp.constraints:
+            lines += [r"\textbf{Constraints.} " + latex_safe_with_math(sp.constraints) + r"\\[6pt]"]
+        if sp.why_easier:
+            lines += [r"\textbf{Why easier.} " + latex_safe_with_math(sp.why_easier) + r"\\[6pt]"]
+        if sp.intended_technique:
+            lines += [r"\textbf{Intended technique.} " + latex_safe_with_math(sp.intended_technique, keep_newlines=False) + r"\\[6pt]"]
+        if sp.notes_for_setter:
+            lines += [r"\textbf{Setter notes.} " + latex_safe_with_math(sp.notes_for_setter) + r"\\[6pt]"]
+        if sp.sample_input:
+            lines += [r"\textbf{Sample input.}", r"\begin{Verbatim}[fontsize=\small]"]
+            lines += [sanitize_verbatim_text(sp.sample_input), r"\end{Verbatim}"]
+        if sp.sample_output:
+            lines += [r"\textbf{Sample output.}", r"\begin{Verbatim}[fontsize=\small]"]
+            lines += [sanitize_verbatim_text(sp.sample_output), r"\end{Verbatim}"]
+        lines.append("")
+    return lines
+
+
+def render_latex(res: Result) -> str:
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [
+        r"\documentclass[11pt,a4paper]{article}",
+        r"\usepackage[margin=1in]{geometry}",
+        r"\usepackage[T1]{fontenc}",
+        r"\usepackage[utf8]{inputenc}",
+        r"\usepackage{amsmath,amssymb}",
+        r"\usepackage{enumitem}",
+        r"\usepackage{hyperref}",
+        r"\usepackage{longtable}",
+        r"\usepackage{booktabs}",
+        r"\usepackage{fancyvrb}",
+        r"\usepackage{titlesec}",
+        r"\titleformat{\section}{\Large\bfseries}{\thesection}{0.8em}{}",
+        r"\titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.8em}{}",
+        r"\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}",
+        r"\begin{document}",
+        r"\begin{center}",
+        r"{\LARGE \bfseries " + latex_safe_with_math(res.title, keep_newlines=False) + r"}\\[6pt]",
+        r"{\small Generated on " + latex_safe_with_math(now, keep_newlines=False) + r"}",
+        r"\end{center}",
+        "",
+    ]
+    lines.extend(render_problem_body(res))
+    lines.append(r"\end{document}")
+    return "\n".join(lines)
+
+
+def render_project_json(items: List[Result]) -> str:
+    return json.dumps([dataclasses.asdict(item) for item in items], ensure_ascii=False, indent=2)
+
+
+def render_project_latex(items: List[Result], project_title: str = "Subproblem Project") -> str:
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [
+        r"\documentclass[11pt,a4paper]{article}",
+        r"\usepackage[margin=1in]{geometry}",
+        r"\usepackage[T1]{fontenc}",
+        r"\usepackage[utf8]{inputenc}",
+        r"\usepackage{amsmath,amssymb}",
+        r"\usepackage{enumitem}",
+        r"\usepackage{hyperref}",
+        r"\usepackage{longtable}",
+        r"\usepackage{booktabs}",
+        r"\usepackage{fancyvrb}",
+        r"\usepackage{titlesec}",
+        r"\titleformat{\section}{\Large\bfseries}{\thesection}{0.8em}{}",
+        r"\titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.8em}{}",
+        r"\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}",
+        r"\begin{document}",
+        r"\begin{center}",
+        r"{\LARGE \bfseries " + latex_safe_with_math(project_title, keep_newlines=False) + r"}\\[6pt]",
+        r"{\small Generated on " + latex_safe_with_math(now, keep_newlines=False) + r"}",
+        r"\end{center}",
+        "",
+    ]
+    for idx, res in enumerate(items, 1):
+        lines.append(r"\section*{Problem " + str(idx) + r": " + latex_safe_with_math(res.title, keep_newlines=False) + "}")
+        lines.extend(render_problem_body(res))
+        if idx != len(items):
+            lines.append(r"\newpage")
+    lines.append(r"\end{document}")
+    return "\n".join(lines)
+
+
+def compile_pdf(tex_path: Path) -> tuple[bool, str]:
+    workdir = tex_path.parent
+    candidates = [
+        ["latexmk", "-xelatex", "-interaction=nonstopmode", "-halt-on-error", tex_path.name],
+        ["xelatex", "-interaction=nonstopmode", "-halt-on-error", tex_path.name],
+        ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", tex_path.name],
+    ]
+    last = ""
+    for cmd in candidates:
+        if shutil.which(cmd[0]) is None:
+            continue
+        proc = subprocess.run(cmd, cwd=workdir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        last = proc.stdout or ""
+        if proc.returncode == 0 and tex_path.with_suffix(".pdf").exists():
+            return True, f"Compiled with {' '.join(cmd)}"
+    return False, last[-3000:] if last else "No LaTeX compiler found."
+
+
+# ----------------------------- saving -----------------------------
+
+def save_single_outputs(res: Result, outdir: Path, stem: Optional[str] = None, pdf: bool = False) -> Dict[str, Path]:
+    outdir.mkdir(parents=True, exist_ok=True)
+    stem = stem or slugify(res.title, "problem")
+    json_path = outdir / f"{stem}.json"
+    tex_path = outdir / f"{stem}.tex"
+
+    json_path.write_text(json.dumps(dataclasses.asdict(res), ensure_ascii=False, indent=2), encoding="utf-8")
+    tex_path.write_text(render_latex(res), encoding="utf-8")
+
+    paths: Dict[str, Path] = {"json": json_path, "tex": tex_path}
+    if pdf:
+        ok, msg = compile_pdf(tex_path)
+        (outdir / f"{stem}_pdf_log.txt").write_text(msg, encoding="utf-8")
+        if ok and tex_path.with_suffix(".pdf").exists():
+            paths["pdf"] = tex_path.with_suffix(".pdf")
+    return paths
+
+
+def save_project_outputs(items: List[Result], project_title: str, outdir: Path, pdf: bool = False) -> Dict[str, Path]:
+    outdir.mkdir(parents=True, exist_ok=True)
+    stem = slugify(project_title, "project")
+    json_path = outdir / f"{stem}.json"
+    tex_path = outdir / f"{stem}.tex"
+
+    json_path.write_text(render_project_json(items), encoding="utf-8")
+    tex_path.write_text(render_project_latex(items, project_title=project_title), encoding="utf-8")
+
+    paths: Dict[str, Path] = {"json": json_path, "tex": tex_path}
+    if pdf:
+        ok, msg = compile_pdf(tex_path)
+        (outdir / f"{stem}_pdf_log.txt").write_text(msg, encoding="utf-8")
+        if ok and tex_path.with_suffix(".pdf").exists():
+            paths["pdf"] = tex_path.with_suffix(".pdf")
+    return paths
+
+
+# ----------------------------- streamlit UI -----------------------------
+
+def run_ui() -> None:
+    try:
+        import streamlit as st
+    except ImportError as e:
+        raise SystemExit("Streamlit not installed. Install it with: pip install streamlit") from e
+
+    st.set_page_config(page_title="Subproblem Studio", layout="wide")
+    st.title("Subproblem Studio")
+    st.caption("Paste a statement or URL, generate easier related subproblems, add them to a local project, and export one combined file.")
+
+    if "project_items" not in st.session_state:
+        st.session_state.project_items = []
+
+    with st.sidebar:
+        st.header("Settings")
+        model = st.text_input("Model", value=os.getenv("LLM_MODEL", "gemini-2.5-flash"))
+        api_key = st.text_input("API key", value=get_api_key(), type="password")
+        n = st.slider("Number of subproblems", 3, 8, 5)
+        language = st.selectbox("Language", ["en", "vi"], index=0)
+        pdf = st.checkbox("Compile PDF", value=False)
+        project_title = st.text_input("Project title", value="Subproblem Project")
+        st.markdown("Use `GOOGLE_API_KEY` or `GEMINI_API_KEY` for the API key.")
+
+        st.divider()
+        st.subheader(f"Project queue ({len(st.session_state.project_items)})")
+        for idx, item in enumerate(list(st.session_state.project_items)):
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                st.write(f"{idx + 1}. {item.title or 'Untitled'}")
+            with c2:
+                if st.button("Remove", key=f"remove_{idx}"):
+                    st.session_state.project_items.pop(idx)
+                    st.rerun()
+
+        if st.session_state.project_items:
+            outdir = Path("subproblem_studio_out")
+            if st.button("Export project JSON"):
+                paths = save_project_outputs(st.session_state.project_items, project_title, outdir, pdf=False)
+                st.success(f"Wrote {paths['json']}")
+            if st.button("Export project TEX"):
+                paths = save_project_outputs(st.session_state.project_items, project_title, outdir, pdf=False)
+                st.success(f"Wrote {paths['tex']}")
+                st.code(paths["tex"].read_text(encoding="utf-8"), language="latex")
+            if st.button("Export project TEX + PDF"):
+                paths = save_project_outputs(st.session_state.project_items, project_title, outdir, pdf=pdf)
+                st.success(f"Wrote {paths['tex']}")
+                if "pdf" in paths:
+                    st.success(f"Wrote {paths['pdf']}")
+                else:
+                    st.warning("PDF was not built. Check the log file in subproblem_studio_out/.")
+
+    src_type = st.radio("Input type", ["Raw text", "URL", "File"], horizontal=True)
+    source = ""
+
+    if src_type == "Raw text":
+        source = st.text_area("Statement", height=280, placeholder="Paste the statement here...")
+    elif src_type == "URL":
+        source = st.text_input("URL")
+    else:
+        up = st.file_uploader("Upload .txt/.md/.docx", type=["txt", "md", "markdown", "docx"])
+        if up is not None:
+            tmp = Path(f".upload_{up.name}")
+            tmp.write_bytes(up.getvalue())
+            source = str(tmp)
+
+    if st.button("Generate", type="primary"):
+        if not source.strip():
+            st.error("Provide a statement, URL, or file.")
+            return
+        if not api_key:
+            st.error("Missing API key. Set GOOGLE_API_KEY or enter it in the sidebar.")
+            return
+
+        try:
+            statement = load_input(source)
+            res = generate(statement, n=n, model=model, api_key=api_key, language=language)
+        except Exception as e:
+            st.error(f"Failed: {e}")
+            return
+
+        st.success("Generated.")
+        res.title = st.text_input("Title", value=res.title)
+        res.original_summary = st.text_area("Original summary", value=res.original_summary, height=110)
+        kbuf = st.text_area("Key ideas (one per line)", value="\n".join(res.key_ideas), height=100)
+        res.key_ideas = [x.strip() for x in kbuf.splitlines() if x.strip()]
+
+        edited: List[Subproblem] = []
+        for i, sp in enumerate(res.subproblems, 1):
+            with st.expander(f"Subproblem {i}", expanded=(i == 1)):
+                title = st.text_input(f"Title {i}", value=sp.title, key=f"title_{i}")
+                statement_ = st.text_area(f"Statement {i}", value=sp.statement, height=120, key=f"st_{i}")
+                why = st.text_area(f"Why easier {i}", value=sp.why_easier, height=80, key=f"why_{i}")
+                tech = st.text_input(f"Technique {i}", value=sp.intended_technique, key=f"tech_{i}")
+                con = st.text_area(f"Constraints {i}", value=sp.constraints, height=70, key=f"con_{i}")
+                si = st.text_area(f"Sample input {i}", value=sp.sample_input, height=70, key=f"si_{i}")
+                so = st.text_area(f"Sample output {i}", value=sp.sample_output, height=70, key=f"so_{i}")
+                notes = st.text_area(f"Notes {i}", value=sp.notes_for_setter, height=70, key=f"notes_{i}")
+                edited.append(Subproblem(title, statement_, why, tech, con, si, so, notes))
+        res.subproblems = edited
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button("Add to project"):
+                st.session_state.project_items.append(res)
+                st.success("Added current result to the project queue.")
+        with c2:
+            if st.button("Export single TEX"):
+                paths = save_single_outputs(res, Path("subproblem_studio_out"), pdf=False)
+                st.success(f"Wrote {paths['tex']}")
+                st.code(paths["tex"].read_text(encoding="utf-8"), language="latex")
+        with c3:
+            if st.button("Export single TEX + PDF"):
+                paths = save_single_outputs(res, Path("subproblem_studio_out"), pdf=pdf)
+                st.success(f"Wrote {paths['tex']}")
+                if "pdf" in paths:
+                    st.success(f"Wrote {paths['pdf']}")
+                else:
+                    st.warning("PDF was not built. Check the log file in subproblem_studio_out/.")
+
+
+# ----------------------------- CLI -----------------------------
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Generate easier related subproblems from a statement or URL.")
+    ap.add_argument("--input", "-i", help="URL, file path, or raw text.")
+    ap.add_argument("--stdin", action="store_true", help="Read the statement from stdin.")
+    ap.add_argument("--outdir", default="subproblem_studio_out")
+    ap.add_argument("--stem", default="")
+    ap.add_argument("--n", type=int, default=5)
+    ap.add_argument("--language", choices=["en", "vi"], default="en")
+    ap.add_argument("--model", default=os.getenv("LLM_MODEL", "gemini-2.5-flash"))
+    ap.add_argument("--api-key", default=get_api_key())
+    ap.add_argument("--temperature", type=float, default=0.2)
+    ap.add_argument("--pdf", action="store_true")
+    ap.add_argument("--ui", action="store_true", help="Launch Streamlit UI.")
+    args = ap.parse_args()
+
+    if args.ui:
+        run_ui()
+        return 0
+
+    if args.stdin:
+        source = sys.stdin.read()
+    elif args.input:
+        source = args.input
+    else:
+        print("Use --input or --stdin, or run with --ui.", file=sys.stderr)
+        return 2
+
+    if not args.api_key:
+        print("Missing API key. Set GOOGLE_API_KEY or GEMINI_API_KEY.", file=sys.stderr)
+        return 2
+
+    try:
+        statement = load_input(source)
+        res = generate(
+            statement,
+            n=args.n,
+            model=args.model,
+            api_key=args.api_key,
+            language=args.language,
+            temperature=args.temperature,
+        )
+    except Exception as e:
+        print(f"Generation failed: {e}", file=sys.stderr)
+        return 1
+
+    paths = save_single_outputs(res, Path(args.outdir), stem=args.stem or slugify(res.title, "problem"), pdf=args.pdf)
+    print(f"JSON: {paths['json']}")
+    print(f"TEX : {paths['tex']}")
+    if "pdf" in paths:
+        print(f"PDF : {paths['pdf']}")
+    elif args.pdf:
+        print(f"PDF compilation log: {Path(args.outdir) / (args.stem or slugify(res.title, 'problem'))}_pdf_log.txt")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

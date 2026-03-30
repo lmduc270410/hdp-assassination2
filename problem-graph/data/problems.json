@@ -1,0 +1,25 @@
+[
+  {
+    "id": "P1314",
+    "title": "...",
+    "tags": [
+      "dp",
+      "greedy",
+      "binary_search",
+      "graph"
+    ],
+    "techniques": [
+      "kadane",
+      "difference_array",
+      "binary_search_on_answer"
+    ],
+    "data_structures": [
+      "array",
+      "segment_tree",
+      "priority_queue"
+    ],
+    "algorithmic_signature": "adjusting the parameter W to minimize |s-y|",
+    "embedding_text": "minimize the difference between standard value and total value of minerals in intervals",
+    "link": "https://www.luogu.com.cn/problem/P1314"
+  }
+]
