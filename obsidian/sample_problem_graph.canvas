@@ -1,0 +1,49 @@
+{
+  "nodes": [
+    {
+      "id": "file:p1314",
+      "type": "file",
+      "file": "Problems/P1314.md",
+      "x": 0,
+      "y": 0,
+      "width": 320,
+      "height": 140
+    },
+    {
+      "id": "file:p4552",
+      "type": "file",
+      "file": "Problems/P4552.md",
+      "x": 420,
+      "y": 0,
+      "width": 320,
+      "height": 140
+    },
+    {
+      "id": "file:p8218",
+      "type": "file",
+      "file": "Problems/P8218.md",
+      "x": 210,
+      "y": 220,
+      "width": 320,
+      "height": 140
+    },
+    {
+      "id": "edge:p1314__p4552",
+      "type": "edge",
+      "fromNode": "file:p1314",
+      "toNode": "file:p4552",
+      "label": "same idea",
+      "labelStyle": "inline",
+      "color": "default"
+    },
+    {
+      "id": "edge:p1314__p8218",
+      "type": "edge",
+      "fromNode": "file:p1314",
+      "toNode": "file:p8218",
+      "label": "same technique",
+      "labelStyle": "inline",
+      "color": "default"
+    }
+  ]
+}

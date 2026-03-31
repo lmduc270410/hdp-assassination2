@@ -1,0 +1,40 @@
+{
+  "nodes": [
+    {
+      "id": "p1314",
+      "label": "P1314",
+      "type": "note",
+      "file": "Problems/P1314.md",
+      "x": 0,
+      "y": 0
+    },
+    {
+      "id": "p4552",
+      "label": "P4552",
+      "type": "note",
+      "file": "Problems/P4552.md",
+      "x": 420,
+      "y": 0
+    },
+    {
+      "id": "p8218",
+      "label": "P8218",
+      "type": "note",
+      "file": "Problems/P8218.md",
+      "x": 210,
+      "y": 220
+    }
+  ],
+  "edges": [
+    {
+      "from": "p1314",
+      "to": "p4552",
+      "label": "same idea"
+    },
+    {
+      "from": "p1314",
+      "to": "p8218",
+      "label": "same technique"
+    }
+  ]
+}

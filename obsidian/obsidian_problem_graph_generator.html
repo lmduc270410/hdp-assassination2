@@ -1,0 +1,1202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Obsidian Problem Graph Generator</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --panel2: #1f2430;
+      --text: #e7eaf0;
+      --muted: #9aa4b2;
+      --accent: #7aa2f7;
+      --border: #2b3240;
+      --good: #8bd5ca;
+      --warn: #f5a97f;
+      --danger: #ed8796;
+      --shadow: 0 8px 30px rgba(0,0,0,.28);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: linear-gradient(180deg, #0b0d12, #12151c 30%, #0f1115);
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 20px;
+      display: grid;
+      grid-template-columns: 420px 1fr;
+      gap: 16px;
+      min-height: 100vh;
+    }
+    .panel {
+      background: rgba(23,26,33,.92);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .panel header {
+      padding: 16px 18px 12px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(31,36,48,.65);
+    }
+    .panel header h1, .panel header h2 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.25;
+    }
+    .panel header p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .content { padding: 16px 18px 18px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .stack { display: grid; gap: 10px; }
+    .card {
+      background: rgba(31,36,48,.75);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+    }
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      letter-spacing: .02em;
+    }
+    input[type="text"], input[type="number"], textarea, select {
+      width: 100%;
+      background: #0f1218;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 12px;
+      padding: 10px 12px;
+      outline: none;
+      font: inherit;
+    }
+    textarea { min-height: 130px; resize: vertical; }
+    input:focus, textarea:focus, select:focus {
+      border-color: #4a5a7a;
+      box-shadow: 0 0 0 3px rgba(122,162,247,.15);
+    }
+    button, .btn {
+      appearance: none;
+      border: 1px solid transparent;
+      background: var(--accent);
+      color: #081018;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+      transition: transform .06s ease, opacity .2s ease;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    button:hover, .btn:hover { opacity: .95; }
+    button:active, .btn:active { transform: translateY(1px); }
+    .secondary {
+      background: #242b38;
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .danger {
+      background: var(--danger);
+      color: #1a0a0d;
+    }
+    .tiny {
+      font-size: 12px;
+      padding: 8px 10px;
+      border-radius: 10px;
+    }
+    .muted { color: var(--muted); font-size: 12px; }
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .files {
+      max-height: 220px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #0f1218;
+    }
+    .file-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(43,50,64,.65);
+      font-size: 13px;
+      align-items: center;
+    }
+    .file-item:last-child { border-bottom: 0; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--border);
+      background: #0f1218;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .main {
+      display: grid;
+      gap: 16px;
+      grid-template-rows: auto 1fr;
+      min-width: 0;
+    }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .tab {
+      background: #242b38;
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .tab.active { background: var(--accent); color: #071018; }
+    .grid2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      min-width: 0;
+    }
+    .preview {
+      height: calc(100vh - 110px);
+      min-height: 700px;
+      overflow: auto;
+      position: relative;
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 12px;
+      line-height: 1.45;
+      color: #dfe7f1;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      border-bottom: 1px solid rgba(43,50,64,.65);
+      text-align: left;
+      padding: 8px 8px;
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    .status {
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(139,213,202,.08);
+      border: 1px solid rgba(139,213,202,.22);
+      color: #c8f4ef;
+      font-size: 13px;
+    }
+    .status.warn {
+      background: rgba(245,169,127,.08);
+      border-color: rgba(245,169,127,.22);
+      color: #ffd6be;
+    }
+    .status.err {
+      background: rgba(237,135,150,.08);
+      border-color: rgba(237,135,150,.22);
+      color: #ffd4dc;
+    }
+    .canvas-box {
+      border: 1px dashed #334055;
+      border-radius: 18px;
+      padding: 16px;
+      background: rgba(15,18,24,.5);
+      overflow: hidden;
+    }
+    .note {
+      background: rgba(15,18,24,.75);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      font-size: 13px;
+      line-height: 1.5;
+      color: #dfe7f1;
+    }
+    .note code {
+      background: #0c1016;
+      border: 1px solid #2f3746;
+      padding: 1px 5px;
+      border-radius: 6px;
+      color: #b7c7ff;
+    }
+    .hidden { display: none !important; }
+    .small { font-size: 12px; color: var(--muted); }
+    .right-tools {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-left: auto;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .taglist { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+    .tag {
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: #0e131b;
+      color: #c6d3f0;
+    }
+    @media (max-width: 1100px) {
+      .wrap { grid-template-columns: 1fr; }
+      .preview { height: auto; min-height: 500px; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <section class="panel">
+    <header>
+      <h1>Obsidian Problem Graph Generator</h1>
+      <p>Local website for importing Markdown notes, building similarity links, and exporting <span class="mono">graph.json</span> or <span class="mono">.canvas</span>.</p>
+    </header>
+    <div class="content stack">
+      <div class="card stack">
+        <div>
+          <label>Import Markdown notes from a folder</label>
+          <input id="fileInput" type="file" accept=".md,.markdown,text/markdown" multiple webkitdirectory />
+          <div class="small" style="margin-top:6px;">Select your vault folder or a Problems folder. The app will read all Markdown files inside.</div>
+        </div>
+        <div class="row">
+          <button id="buildBtn">Build graph</button>
+          <button id="exportJsonBtn" class="secondary">Download graph.json</button>
+          <button id="exportCanvasBtn" class="secondary">Download graph.canvas</button>
+        </div>
+        <div class="row">
+          <button id="saveStateBtn" class="secondary tiny">Save local project</button>
+          <button id="loadStateBtn" class="secondary tiny">Load local project</button>
+          <button id="clearBtn" class="danger tiny">Clear</button>
+        </div>
+        <div id="status" class="status warn">No notes loaded yet.</div>
+      </div>
+
+      <div class="card stack">
+        <h2 style="margin:0;font-size:16px;">Add a problem manually</h2>
+        <div class="split">
+          <div>
+            <label>Filename / note path</label>
+            <input id="manualPath" type="text" placeholder="Problems/P1314.md" />
+          </div>
+          <div>
+            <label>Title</label>
+            <input id="manualTitle" type="text" placeholder="P1314" />
+          </div>
+        </div>
+        <div class="split">
+          <div>
+            <label>Tags (comma separated)</label>
+            <input id="manualTags" type="text" placeholder="dp, prefix sums, binary search" />
+          </div>
+          <div>
+            <label>Techniques (comma separated)</label>
+            <input id="manualTechniques" type="text" placeholder="prefix sums, monotonicity" />
+          </div>
+        </div>
+        <div class="split">
+          <div>
+            <label>Outgoing links (comma separated)</label>
+            <input id="manualLinks" type="text" placeholder="[[P4552]], [[P8218]]" />
+          </div>
+          <div>
+            <label>Language</label>
+            <input id="manualLang" type="text" placeholder="en" value="en" />
+          </div>
+        </div>
+        <div>
+          <label>Statement / solution text</label>
+          <textarea id="manualBody" placeholder="Paste statement, notes, solution, or core idea here..."></textarea>
+        </div>
+        <div class="row">
+          <button id="addManualBtn">Add problem</button>
+          <button id="sampleBtn" class="secondary">Load sample data</button>
+        </div>
+      </div>
+
+      <div class="card stack">
+        <div class="toolbar">
+          <strong>Graph settings</strong>
+          <div class="right-tools"></div>
+        </div>
+        <div class="split">
+          <div>
+            <label>Top neighbors per node</label>
+            <input id="topK" type="number" min="1" max="20" value="4" />
+          </div>
+          <div>
+            <label>Similarity threshold</label>
+            <input id="threshold" type="number" min="0" max="1" step="0.01" value="0.18" />
+          </div>
+        </div>
+        <div class="split">
+          <div>
+            <label>Boost for explicit links</label>
+            <input id="explicitBoost" type="number" min="0" max="2" step="0.05" value="0.55" />
+          </div>
+          <div>
+            <label>Use title/path in similarity</label>
+            <select id="useTitlePath">
+              <option value="yes" selected>Yes</option>
+              <option value="no">No</option>
+            </select>
+          </div>
+        </div>
+        <div class="small">
+          Similarity uses shared tags, shared techniques, explicit links, and local text overlap. The generated canvas is valid JSON Canvas with file nodes and edge nodes.
+        </div>
+      </div>
+
+      <div class="card stack">
+        <h2 style="margin:0;font-size:16px;">Loaded notes</h2>
+        <div id="files" class="files"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="main">
+    <section class="panel">
+      <header>
+        <h2>Output</h2>
+        <p>Choose a tab to inspect the generated graph, canvas JSON, or extracted note list.</p>
+      </header>
+      <div class="content">
+        <div class="tabs">
+          <button class="tab active" data-tab="graph">Graph preview</button>
+          <button class="tab" data-tab="json">graph.json</button>
+          <button class="tab" data-tab="canvas">graph.canvas</button>
+          <button class="tab" data-tab="table">Similarity table</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel preview">
+      <div class="content">
+        <div id="graphTab" class="tabPane">
+          <div class="canvas-box">
+            <svg id="svg" width="100%" height="760" viewBox="0 0 1600 760" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+                  <path d="M0,0 L10,5 L0,10 z" fill="#6f7f99"></path>
+                </marker>
+              </defs>
+            </svg>
+          </div>
+        </div>
+
+        <div id="jsonTab" class="tabPane hidden">
+          <pre id="jsonOut"></pre>
+        </div>
+
+        <div id="canvasTab" class="tabPane hidden">
+          <pre id="canvasOut"></pre>
+        </div>
+
+        <div id="tableTab" class="tabPane hidden">
+          <div class="note">
+            This table shows the strongest automatic links. Explicit note links are always boosted, then shared techniques/tags/text decide the rest.
+          </div>
+          <div style="height:12px;"></div>
+          <div style="overflow:auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>From</th>
+                  <th>To</th>
+                  <th>Score</th>
+                  <th>Why</th>
+                </tr>
+              </thead>
+              <tbody id="tableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </section>
+</div>
+
+<script>
+(() => {
+  const state = {
+    notes: [],
+    graph: { nodes: [], edges: [] },
+    canvas: { nodes: [], edges: [] },
+    similarityRows: [],
+  };
+
+  const $ = (id) => document.getElementById(id);
+
+  const fileInput = $("fileInput");
+  const filesBox = $("files");
+  const statusBox = $("status");
+  const svg = $("svg");
+  const jsonOut = $("jsonOut");
+  const canvasOut = $("canvasOut");
+  const tableBody = $("tableBody");
+
+  const tabs = Array.from(document.querySelectorAll(".tab"));
+  const panes = {
+    graph: $("graphTab"),
+    json: $("jsonTab"),
+    canvas: $("canvasTab"),
+    table: $("tableTab"),
+  };
+
+  function setStatus(message, kind = "warn") {
+    statusBox.textContent = message;
+    statusBox.className = `status ${kind === "ok" ? "" : kind}`;
+  }
+
+  function slugify(s) {
+    return String(s || "")
+      .toLowerCase()
+      .trim()
+      .replace(/['"]/g, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  }
+
+  function uniq(arr) {
+    return [...new Set(arr.filter(Boolean))];
+  }
+
+  function parseYamlListValue(value) {
+    const v = value.trim();
+    if (!v) return [];
+    if (v.startsWith("[") && v.endsWith("]")) {
+      return v.slice(1, -1).split(",").map(x => x.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
+    }
+    return [v.replace(/^['"]|['"]$/g, "")];
+  }
+
+  function parseFrontmatter(text) {
+    const out = {};
+    if (!text.startsWith("---")) return out;
+    const lines = text.split(/\r?\n/);
+    if (lines[0].trim() !== "---") return out;
+    let i = 1;
+    for (; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.trim() === "---") break;
+      const idx = line.indexOf(":");
+      if (idx === -1) continue;
+      const key = line.slice(0, idx).trim();
+      const value = line.slice(idx + 1).trim();
+      if (value === "") {
+        const list = [];
+        i++;
+        while (i < lines.length && /^\s*-\s+/.test(lines[i])) {
+          list.push(lines[i].replace(/^\s*-\s+/, "").trim().replace(/^['"]|['"]$/g, ""));
+          i++;
+        }
+        i--;
+        out[key] = list;
+      } else {
+        if (value === "true") out[key] = true;
+        else if (value === "false") out[key] = false;
+        else if (/^-?\d+(\.\d+)?$/.test(value)) out[key] = Number(value);
+        else if (value.startsWith("[") && value.endsWith("]")) out[key] = parseYamlListValue(value);
+        else out[key] = value.replace(/^['"]|['"]$/g, "");
+      }
+    }
+    return out;
+  }
+
+  function stripFrontmatter(text) {
+    if (!text.startsWith("---")) return text;
+    const end = text.indexOf("\n---", 3);
+    if (end === -1) return text;
+    return text.slice(end + 4).replace(/^\s*\n/, "");
+  }
+
+  function markdownToText(md) {
+    return md
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/!\[\[[^\]]+\]\]/g, " ")
+      .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
+      .replace(/\[\[([^\]]+)\]\]/g, "$1")
+      .replace(/#{1,6}\s+/g, "")
+      .replace(/[*_~>`\-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function extractInlineTags(text) {
+    const tags = [];
+    const re = /(^|[^A-Za-z0-9_/])#([A-Za-z0-9/_-]+)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) tags.push(m[2]);
+    return tags;
+  }
+
+  function extractLinks(text) {
+    const links = [];
+    const re = /\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g;
+    let m;
+    while ((m = re.exec(text)) !== null) links.push(m[1].trim());
+    return uniq(links);
+  }
+
+  function extractHeadingTitle(text, fallback) {
+    const m = text.match(/^\s*#\s+(.+)$/m);
+    return m ? m[1].trim() : fallback;
+  }
+
+  function extractSection(text, heading) {
+    const esc = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`^#{2,6}\\s+${esc}\\s*$([\\s\\S]*?)(?=^#{2,6}\\s+|\\Z)`, "mi");
+    const m = text.match(re);
+    return m ? m[1].trim() : "";
+  }
+
+  function extractBulletItems(text) {
+    const items = [];
+    text.split(/\r?\n/).forEach(line => {
+      const m = line.match(/^\s*[-*+]\s+(.+)$/);
+      if (m) items.push(m[1].trim());
+    });
+    return items;
+  }
+
+  function normalizeList(x) {
+    if (!x) return [];
+    if (Array.isArray(x)) return x.flatMap(normalizeList).filter(Boolean);
+    if (typeof x === "string") return x.split(",").map(s => s.trim()).filter(Boolean);
+    return [];
+  }
+
+  function tokenize(text) {
+    const stop = new Set([
+      "the","and","or","to","of","a","in","for","on","with","as","is","are","be","this","that","it",
+      "by","an","at","from","into","use","using","used","can","will","we","you","your","their",
+      "problem","solution","idea","ideas","note","notes","core","approach","statement","given",
+      "then","than","also","may","must","should","all","each","every","new","old","more","less",
+      "when","where","which","what","how","why","while","between","within","without","have","has",
+      "had","but","not","only","if","else","just","over","under","same","different"
+    ]);
+    return String(text || "")
+      .toLowerCase()
+      .replace(/\[\[[^\]]+\]\]/g, " ")
+      .replace(/https?:\/\/\S+/g, " ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .split(/\s+/)
+      .filter(w => w && w.length > 1 && !stop.has(w));
+  }
+
+  function cosineSimilarity(aTokens, bTokens) {
+    const fa = new Map();
+    const fb = new Map();
+    aTokens.forEach(t => fa.set(t, (fa.get(t) || 0) + 1));
+    bTokens.forEach(t => fb.set(t, (fb.get(t) || 0) + 1));
+    let dot = 0, na = 0, nb = 0;
+    for (const [k, v] of fa) {
+      na += v * v;
+      if (fb.has(k)) dot += v * fb.get(k);
+    }
+    for (const v of fb.values()) nb += v * v;
+    if (!na || !nb) return 0;
+    return dot / (Math.sqrt(na) * Math.sqrt(nb));
+  }
+
+  function jaccard(a, b) {
+    const A = new Set(a.filter(Boolean).map(x => String(x).toLowerCase()));
+    const B = new Set(b.filter(Boolean).map(x => String(x).toLowerCase()));
+    if (!A.size && !B.size) return 0;
+    let inter = 0;
+    for (const x of A) if (B.has(x)) inter++;
+    return inter / new Set([...A, ...B]).size;
+  }
+
+  function parseNote(filePath, text) {
+    const frontmatter = parseFrontmatter(text);
+    const body = stripFrontmatter(text);
+    const title =
+      frontmatter.title ||
+      extractHeadingTitle(body, filePath.split(/[\\/]/).pop().replace(/\.(md|markdown)$/i, "")) ||
+      filePath;
+
+    const tags = uniq([
+      ...normalizeList(frontmatter.tags),
+      ...extractInlineTags(body),
+    ]);
+
+    const techniques = uniq([
+      ...normalizeList(frontmatter.techniques),
+      ...normalizeList(frontmatter.ideas),
+      ...normalizeList(frontmatter.methods),
+    ]);
+
+    const summarySections = [
+      extractSection(body, "Core Idea"),
+      extractSection(body, "Idea"),
+      extractSection(body, "Approach"),
+      extractSection(body, "Solution"),
+      extractSection(body, "Summary"),
+    ].filter(Boolean);
+
+    const bulletIdeas = summarySections.flatMap(extractBulletItems);
+    const outgoingLinks = extractLinks(body);
+    const plain = markdownToText(body);
+
+    return {
+      id: slugify(frontmatter.problem_id || title || filePath),
+      file: filePath,
+      title,
+      language: frontmatter.language || frontmatter.lang || "unknown",
+      tags,
+      techniques,
+      outgoingLinks,
+      body,
+      text: plain,
+      ideaText: uniq([...bulletIdeas, ...techniques, ...tags]).join(" "),
+      frontmatter,
+    };
+  }
+
+  async function readFileAsText(file) {
+    return await file.text();
+  }
+
+  async function importFiles(fileList) {
+    const files = Array.from(fileList || []).filter(f => /\.(md|markdown)$/i.test(f.name));
+    if (!files.length) {
+      setStatus("No Markdown files found in the selected input.", "err");
+      return;
+    }
+    const notes = [];
+    for (const file of files) {
+      const text = await readFileAsText(file);
+      const rel = file.webkitRelativePath || file.name;
+      notes.push(parseNote(rel, text));
+    }
+    state.notes = notes;
+    renderLoadedFiles();
+    setStatus(`Loaded ${notes.length} notes. Click “Build graph”.`, "ok");
+  }
+
+  function addManualNote() {
+    const file = $("manualPath").value.trim() || `Problems/${($("manualTitle").value.trim() || "untitled").replace(/\s+/g, "_")}.md`;
+    const title = $("manualTitle").value.trim() || file.replace(/^.*[\\/]/, "").replace(/\.(md|markdown)$/i, "");
+    const tags = $("manualTags").value.split(",").map(s => s.trim()).filter(Boolean);
+    const techniques = $("manualTechniques").value.split(",").map(s => s.trim()).filter(Boolean);
+    const outgoingLinks = $("manualLinks").value
+      .split(",")
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(s => s.replace(/^\[\[/, "").replace(/\]\]$/, ""));
+    const body = $("manualBody").value.trim() || "";
+    const language = $("manualLang").value.trim() || "unknown";
+    const frontmatter = { title, tags, techniques, language };
+    const text = `---\n${Object.entries(frontmatter).map(([k,v]) => `${k}: ${Array.isArray(v) ? JSON.stringify(v) : JSON.stringify(v).replace(/^"|"$/g,'')}`).join("\n")}\n---\n\n${body}`;
+    const note = parseNote(file, text);
+    note.tags = uniq(tags.concat(note.tags));
+    note.techniques = uniq(techniques.concat(note.techniques));
+    note.outgoingLinks = uniq(outgoingLinks.concat(note.outgoingLinks));
+    note.language = language;
+    state.notes.push(note);
+    renderLoadedFiles();
+    setStatus(`Added note "${note.title}".`, "ok");
+  }
+
+  function explicitLinkScore(a, b) {
+    const linksA = new Set(a.outgoingLinks.map(x => x.toLowerCase()));
+    const linksB = new Set(b.outgoingLinks.map(x => x.toLowerCase()));
+    const aToB = linksA.has(b.title.toLowerCase()) || linksA.has(b.id.toLowerCase()) || linksA.has(slugify(b.title));
+    const bToA = linksB.has(a.title.toLowerCase()) || linksB.has(a.id.toLowerCase()) || linksB.has(slugify(a.title));
+    return (aToB || bToA) ? 1 : 0;
+  }
+
+  function similarity(a, b, opts) {
+    const tagSim = jaccard(a.tags, b.tags);
+    const techSim = jaccard(a.techniques, b.techniques);
+    const textSim = cosineSimilarity(tokenize(a.text + " " + a.ideaText), tokenize(b.text + " " + b.ideaText));
+    const explicit = explicitLinkScore(a, b);
+    const titleBoost = opts.useTitlePath ? jaccard(tokenize(a.title + " " + a.file), tokenize(b.title + " " + b.file)) : 0;
+    const score =
+      explicit * opts.explicitBoost +
+      tagSim * 0.24 +
+      techSim * 0.42 +
+      textSim * 0.22 +
+      titleBoost * 0.12;
+    const reasons = [];
+    if (explicit) reasons.push("explicit link");
+    if (tagSim > 0) reasons.push(`tags ${tagSim.toFixed(2)}`);
+    if (techSim > 0) reasons.push(`techniques ${techSim.toFixed(2)}`);
+    if (textSim > 0) reasons.push(`text ${textSim.toFixed(2)}`);
+    if (titleBoost > 0) reasons.push(`title/path ${titleBoost.toFixed(2)}`);
+    return { score, reasons };
+  }
+
+  function buildGraph() {
+    const opts = {
+      topK: Math.max(1, Number($("topK").value || 4)),
+      threshold: Math.max(0, Number($("threshold").value || 0.18)),
+      explicitBoost: Math.max(0, Number($("explicitBoost").value || 0.55)),
+      useTitlePath: $("useTitlePath").value === "yes",
+    };
+
+    const notes = state.notes.slice();
+    const nodeById = new Map();
+    const graphNodes = [];
+    const graphEdges = [];
+    const rows = [];
+
+    // stable positions on a grid
+    const cols = Math.max(1, Math.ceil(Math.sqrt(notes.length || 1)));
+    const spacingX = 380;
+    const spacingY = 220;
+
+    notes.forEach((n, idx) => {
+      const x = (idx % cols) * spacingX;
+      const y = Math.floor(idx / cols) * spacingY;
+      const nodeId = n.id || slugify(n.title || n.file);
+      const node = {
+        id: nodeId,
+        type: "file",
+        file: n.file,
+        x, y,
+        width: 320,
+        height: 160,
+        color: n.techniques.length ? "4" : undefined,
+      };
+      nodeById.set(n.file, nodeId);
+      nodeById.set(n.title, nodeId);
+      nodeById.set(slugify(n.title), nodeId);
+      graphNodes.push(node);
+    });
+
+    // Pairwise similarities
+    const pairScores = [];
+    for (let i = 0; i < notes.length; i++) {
+      for (let j = i + 1; j < notes.length; j++) {
+        const a = notes[i], b = notes[j];
+        const sim = similarity(a, b, opts);
+        pairScores.push({ a, b, score: sim.score, reasons: sim.reasons });
+      }
+    }
+    pairScores.sort((p, q) => q.score - p.score);
+
+    // explicit links first
+    const edgeSet = new Set();
+    function addEdge(fromNote, toNote, label, color = "4") {
+      const fromId = fromNote.id;
+      const toId = toNote.id;
+      const key = `${fromId}__${toId}`;
+      const reverseKey = `${toId}__${fromId}`;
+      if (edgeSet.has(key) || edgeSet.has(reverseKey)) return;
+      edgeSet.add(key);
+      graphEdges.push({
+        id: `e_${fromId}__${toId}`,
+        fromNode: fromId,
+        toNode: toId,
+        label,
+        color,
+        toEnd: "arrow"
+      });
+    }
+
+    for (const p of pairScores) {
+      if (p.score >= opts.threshold) {
+        rows.push({ from: p.a.title, to: p.b.title, score: p.score, why: p.reasons.join(", ") || "similar" });
+      }
+    }
+
+    // For each note, pick top K neighbors
+    for (const a of notes) {
+      const candidates = pairScores
+        .filter(p => p.a === a || p.b === a)
+        .map(p => {
+          const other = p.a === a ? p.b : p.a;
+          return { other, score: p.score, reasons: p.reasons };
+        })
+        .sort((x, y) => y.score - x.score)
+        .slice(0, opts.topK);
+
+      for (const c of candidates) {
+        if (c.score < opts.threshold) continue;
+        const reason = c.reasons.includes("explicit link")
+          ? "explicit"
+          : c.reasons[0] || "similar";
+        addEdge(a, c.other, reason, c.reasons.includes("explicit link") ? "5" : "4");
+      }
+    }
+
+    // Rebuild rows to show edges only
+    rows.sort((a, b) => b.score - a.score);
+
+    // canvas output
+    const canvasNodes = graphNodes.map((n, idx) => ({
+      id: n.id,
+      type: "file",
+      file: n.file,
+      x: n.x,
+      y: n.y,
+      width: n.width,
+      height: n.height,
+      color: n.color,
+    }));
+
+    const canvasEdges = graphEdges.map(e => ({
+      id: e.id,
+      type: "edge",
+      fromNode: e.fromNode,
+      toNode: e.toNode,
+      label: e.label,
+      color: e.color,
+      toEnd: "arrow",
+      labelStyle: "inline"
+    }));
+
+    state.graph = { nodes: graphNodes, edges: graphEdges };
+    state.canvas = { nodes: canvasNodes, edges: canvasEdges };
+    state.similarityRows = rows;
+
+    renderOutputs();
+    setStatus(`Built graph with ${graphNodes.length} nodes and ${graphEdges.length} edges.`, "ok");
+  }
+
+  function renderLoadedFiles() {
+    if (!state.notes.length) {
+      filesBox.innerHTML = `<div class="file-item"><span>No files loaded</span><span class="muted">—</span></div>`;
+      return;
+    }
+    filesBox.innerHTML = state.notes.map((n, i) => `
+      <div class="file-item">
+        <div>
+          <div><strong>${escapeHtml(n.title)}</strong></div>
+          <div class="muted mono">${escapeHtml(n.file)}</div>
+          <div class="taglist">${n.techniques.slice(0,4).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("")}</div>
+        </div>
+        <button class="tiny secondary" data-remove="${i}">Remove</button>
+      </div>
+    `).join("");
+
+    filesBox.querySelectorAll("[data-remove]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const idx = Number(btn.getAttribute("data-remove"));
+        state.notes.splice(idx, 1);
+        renderLoadedFiles();
+        setStatus(`Removed one note. ${state.notes.length} notes remain.`, "ok");
+      });
+    });
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, s => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    }[s]));
+  }
+
+  function renderOutputs() {
+    const graphJson = JSON.stringify(state.graph, null, 2);
+    const canvasJson = JSON.stringify({ nodes: state.canvas.nodes, edges: state.canvas.edges }, null, 2);
+    jsonOut.textContent = graphJson || "{}";
+    canvasOut.textContent = canvasJson || "{}";
+    renderTable();
+    drawGraph();
+  }
+
+  function renderTable() {
+    if (!state.similarityRows.length) {
+      tableBody.innerHTML = `<tr><td colspan="4" class="muted">No edges yet. Build graph first.</td></tr>`;
+      return;
+    }
+    tableBody.innerHTML = state.similarityRows.slice(0, 200).map(r => `
+      <tr>
+        <td>${escapeHtml(r.from)}</td>
+        <td>${escapeHtml(r.to)}</td>
+        <td class="mono">${r.score.toFixed(3)}</td>
+        <td class="muted">${escapeHtml(r.why)}</td>
+      </tr>
+    `).join("");
+  }
+
+  function drawGraph() {
+    const width = 1600;
+    const height = 760;
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    while (svg.childNodes.length > 1) svg.removeChild(svg.lastChild);
+
+    const nodeMap = new Map();
+    const nodes = state.graph.nodes || [];
+    const edges = state.graph.edges || [];
+
+    for (const n of nodes) nodeMap.set(n.id, n);
+
+    // Edges first
+    for (const e of edges) {
+      const a = nodeMap.get(e.fromNode);
+      const b = nodeMap.get(e.toNode);
+      if (!a || !b) continue;
+      const x1 = a.x + a.width;
+      const y1 = a.y + a.height / 2;
+      const x2 = b.x;
+      const y2 = b.y + b.height / 2;
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      const mx = (x1 + x2) / 2;
+      const d = `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
+      path.setAttribute("d", d);
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", e.color === "5" ? "#8bd5ca" : "#6f7f99");
+      path.setAttribute("stroke-width", "2.2");
+      path.setAttribute("marker-end", "url(#arrow)");
+      path.setAttribute("opacity", "0.82");
+      svg.appendChild(path);
+
+      if (e.label) {
+        const tx = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        tx.setAttribute("x", mx);
+        tx.setAttribute("y", (y1 + y2) / 2 - 6);
+        tx.setAttribute("fill", "#dfe7f1");
+        tx.setAttribute("font-size", "12");
+        tx.setAttribute("text-anchor", "middle");
+        tx.textContent = e.label;
+        svg.appendChild(tx);
+      }
+    }
+
+    // Nodes
+    for (const n of nodes) {
+      const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("x", n.x);
+      rect.setAttribute("y", n.y);
+      rect.setAttribute("rx", 16);
+      rect.setAttribute("ry", 16);
+      rect.setAttribute("width", n.width);
+      rect.setAttribute("height", n.height);
+      rect.setAttribute("fill", "#171a21");
+      rect.setAttribute("stroke", n.color === "4" ? "#8bd5ca" : "#2b3240");
+      rect.setAttribute("stroke-width", "1.4");
+      g.appendChild(rect);
+
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      title.setAttribute("x", n.x + 16);
+      title.setAttribute("y", n.y + 28);
+      title.setAttribute("fill", "#e7eaf0");
+      title.setAttribute("font-size", "15");
+      title.setAttribute("font-weight", "700");
+      title.textContent = n.file.replace(/^.*[\\/]/, "").replace(/\.(md|markdown)$/i, "");
+      g.appendChild(title);
+
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      path.setAttribute("x", n.x + 16);
+      path.setAttribute("y", n.y + 49);
+      path.setAttribute("fill", "#9aa4b2");
+      path.setAttribute("font-size", "11");
+      path.textContent = n.file;
+      g.appendChild(path);
+
+      const note = state.notes.find(x => slugify(x.file) === slugify(n.file) || x.id === n.id);
+      const tags = note ? uniq([...note.techniques, ...note.tags]).slice(0, 4) : [];
+      tags.forEach((t, idx) => {
+        const pill = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+        pill.setAttribute("x", n.x + 16 + idx * 74);
+        pill.setAttribute("y", n.y + 72);
+        pill.setAttribute("width", 68);
+        pill.setAttribute("height", 24);
+        pill.setAttribute("rx", 12);
+        pill.setAttribute("fill", "#0f1218");
+        pill.setAttribute("stroke", "#2b3240");
+        g.appendChild(pill);
+
+        const tText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        tText.setAttribute("x", n.x + 50 + idx * 74);
+        tText.setAttribute("y", n.y + 89);
+        tText.setAttribute("fill", "#c6d3f0");
+        tText.setAttribute("font-size", "10");
+        tText.setAttribute("text-anchor", "middle");
+        tText.textContent = t.length > 10 ? t.slice(0, 10) + "…" : t;
+        g.appendChild(tText);
+      });
+
+      g.addEventListener("mouseenter", () => {
+        rect.setAttribute("stroke-width", "2.6");
+      });
+      g.addEventListener("mouseleave", () => {
+        rect.setAttribute("stroke-width", "1.4");
+      });
+      svg.appendChild(g);
+    }
+  }
+
+  function download(filename, content, mime = "application/json") {
+    const blob = new Blob([content], { type: mime + ";charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  function exportGraphJson() {
+    if (!state.graph.nodes.length) buildGraph();
+    download("graph.json", JSON.stringify(state.graph, null, 2), "application/json");
+  }
+
+  function exportCanvas() {
+    if (!state.graph.nodes.length) buildGraph();
+    const canvasDoc = {
+      nodes: state.canvas.nodes,
+      edges: state.canvas.edges
+    };
+    download("graph.canvas", JSON.stringify(canvasDoc, null, 2), "application/json");
+  }
+
+  function saveLocalProject() {
+    const payload = {
+      notes: state.notes,
+      graph: state.graph,
+      canvas: state.canvas,
+      similarityRows: state.similarityRows
+    };
+    localStorage.setItem("obsidian_problem_graph_project", JSON.stringify(payload));
+    setStatus("Saved to localStorage in this browser.", "ok");
+  }
+
+  function loadLocalProject() {
+    const raw = localStorage.getItem("obsidian_problem_graph_project");
+    if (!raw) {
+      setStatus("No saved local project found.", "err");
+      return;
+    }
+    const payload = JSON.parse(raw);
+    state.notes = payload.notes || [];
+    state.graph = payload.graph || { nodes: [], edges: [] };
+    state.canvas = payload.canvas || { nodes: [], edges: [] };
+    state.similarityRows = payload.similarityRows || [];
+    renderLoadedFiles();
+    renderOutputs();
+    setStatus(`Loaded ${state.notes.length} notes from localStorage.`, "ok");
+  }
+
+  function clearAll() {
+    state.notes = [];
+    state.graph = { nodes: [], edges: [] };
+    state.canvas = { nodes: [], edges: [] };
+    state.similarityRows = [];
+    renderLoadedFiles();
+    renderOutputs();
+    setStatus("Cleared all in-memory data.", "warn");
+  }
+
+  function loadSample() {
+    state.notes = [
+      parseNote("Problems/P1314.md", `---
+title: P1314
+tags: [prefix sums, binary search]
+techniques: [prefix sums, monotonicity]
+language: en
+---
+
+# P1314
+
+## Core Idea
+- transform to prefix sums
+- binary search the answer
+- use a monotonic feasibility check
+
+[[P4552]]
+`),
+      parseNote("Problems/P4552.md", `---
+title: P4552
+tags: [monotonic queue, prefix sums]
+techniques: [prefix sums, monotonic queue]
+language: en
+---
+
+# P4552
+
+## Solution
+- prefix sums
+- maintain a deque for best candidate
+- optimize transitions
+`),
+      parseNote("Problems/P8218.md", `---
+title: P8218
+tags: [sqrt decomposition, range query]
+techniques: [sqrt decomposition, range query]
+language: en
+---
+
+# P8218
+
+## Approach
+- split blocks
+- precompute transitions
+- answer with block decomposition
+`)
+    ];
+    renderLoadedFiles();
+    buildGraph();
+    setStatus("Loaded sample data and built graph.", "ok");
+  }
+
+  tabs.forEach(tab => tab.addEventListener("click", () => {
+    tabs.forEach(t => t.classList.remove("active"));
+    tab.classList.add("active");
+    const name = tab.dataset.tab;
+    Object.entries(panes).forEach(([k, el]) => el.classList.toggle("hidden", k !== name));
+  }));
+
+  fileInput.addEventListener("change", async (e) => {
+    await importFiles(e.target.files);
+  });
+  $("buildBtn").addEventListener("click", buildGraph);
+  $("exportJsonBtn").addEventListener("click", exportGraphJson);
+  $("exportCanvasBtn").addEventListener("click", exportCanvas);
+  $("saveStateBtn").addEventListener("click", saveLocalProject);
+  $("loadStateBtn").addEventListener("click", loadLocalProject);
+  $("clearBtn").addEventListener("click", clearAll);
+  $("addManualBtn").addEventListener("click", addManualNote);
+  $("sampleBtn").addEventListener("click", loadSample);
+
+  renderLoadedFiles();
+  renderOutputs();
+})();
+</script>
+</body>
+</html>
